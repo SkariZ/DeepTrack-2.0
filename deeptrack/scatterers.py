@@ -18,6 +18,7 @@ Ellipsoid
 """
 
 
+from logging import raiseExceptions
 from pint import Quantity
 from . import image
 from deeptrack.backend.units import (
@@ -834,3 +835,519 @@ class MieStratifiedSphere(MieScatterer):
             refractive_index=refractive_index,
             **kwargs,
         )
+
+class RayleighGansScatter(Scatterer):
+    """Base implementation of the Rayleigh-Gans theory of scattering from small particles.
+
+    TODO, explain parameters further.
+
+    Parameters
+    ----------
+    offset_z : "auto" or float
+        Distance from the particle in the z direction the field is evaluated.
+        If "auto", this is calculated from the pixel size and
+        `collection_angle`
+    collection_angle : "auto" or float
+        The maximum collection angle in radians. If "auto", this
+        is calculated from the objective NA (which is true if the objective is 
+        the limiting aperature).
+    polarization_angle : float
+        Angle of the polarization of the incoming light relative to the x-axis.
+    position : array_like[float, float (, float)]
+        The position of the particle. Third index is optional,
+        and represents the position in the direction normal to the
+        camera plane.
+    z : float
+        The position in the direction normal to the
+        camera plane. Used if `position` is of length 2.
+    backscatter : bolean
+        Direction of the scattering.
+
+    """
+
+    __gpu_compatible__ = True
+
+    __conversion_table__ = ConversionTable(
+        radius=(u.meter, u.meter),
+        polarization_angle=(u.radian, u.radian),
+        collection_angle=(u.radian, u.radian),
+        wavelength=(u.meter, u.meter),
+        offset_z=(u.meter, u.meter),
+    )
+
+    def __init__(
+        self,
+        offset_z: PropertyLike[str] = "auto",
+        polarization_angle: PropertyLike[float] = 0,
+        collection_angle: PropertyLike[str] = "auto",
+        refractive_index_medium=None,
+        wavelength=None,
+        NA=None,
+        padding=(0,) * 4,
+        output_region=None,
+        backscatter=False,
+        **kwargs
+    ):
+        kwargs.pop("is_field", None)
+        kwargs.pop("crop_empty", None)
+
+        super().__init__(
+            is_field=True,
+            crop_empty=False,
+            offset_z=offset_z,
+            polarization_angle=polarization_angle,
+            collection_angle=collection_angle,
+            refractive_index_medium=refractive_index_medium,
+            wavelength=wavelength,
+            NA=NA,
+            padding=padding,
+            output_region=output_region,
+            backscatter=backscatter,
+            **kwargs,
+        )
+
+    def _process_properties(self, properties):
+
+        properties = super()._process_properties(properties)
+
+        if properties["collection_angle"] == "auto":
+            properties["collection_angle"] = np.arcsin(
+                properties["NA"] / properties["refractive_index_medium"]
+            )
+
+        if properties["offset_z"] == "auto":
+            properties["offset_z"] = (
+                32
+                * min(properties["voxel_size"][:2])
+                / np.sin(properties["collection_angle"])
+            )
+
+        #If we define an aggregate of spheres, calculate the position of each of these here. As of now, three ways are presented.
+        if properties["form_factor_name"] =="aggregatespheres":
+            #Simulate randomly placed spheres (these can overlap... i.e. use with caution).
+            if properties["position_simulation_case"] == "random":
+                properties["position"] = D.random_spheres(
+                    properties["xy_offset_range"], 
+                    properties["zrange"], 
+                    properties["radius"], 
+                    properties["output_region"])
+
+            #Simulate 2 spheres that are side by side (in 3D)
+            elif properties["position_simulation_case"] == "side_by_side_spheres":
+                properties["position"] = D.side_by_side_spheres(
+                    properties["position"],
+                    properties["xy_offset_range"],
+                    properties["zrange"], 
+                    properties["radius"], 
+                    properties["voxel_size"],
+                    properties["output_region"])
+                    
+            elif properties["position_simulation_case"] == "small_packing_off_spheres":
+                properties["position"] = D.small_packing_off_spheres(
+                    properties["position"],
+                    properties["xy_offset_range"], 
+                    properties["zrange"], 
+                    properties["radius"], 
+                    properties["voxel_size"],
+                    properties["output_region"])
+            else:
+                x_tmp = properties["position_simulation_case"]
+                print(f"position_simulation_case = {x_tmp}, which is not a valid command. Input one of 'random', 'side_by_side_spheres', 'small_packing_off_spheres'."
+                    )
+
+        #Precalculate the clausius mosotti factor
+        if properties["form_factor_name"] == "sphere" or properties["form_factor_name"] == "sphericalshell":
+            properties["K"] = self.ClausiusMossotti(properties["refractive_index"], properties["refractive_index_medium"])
+
+        if properties["form_factor_name"] == "aggregatespheres":
+            properties["K"] = [self.ClausiusMossotti(p, properties["refractive_index_medium"]) for p in properties["refractive_index"]]
+        
+        #Wavevector
+        properties["k"] = 2 * np.pi / properties["wavelength"] * properties["refractive_index_medium"]    
+
+        return properties
+
+    def form_factor_sphere(self, theta, wavevector, radius):
+        """Function for calculating the form factor of a sphere with known radius in the Rayliegh-Gans theory.
+
+        This can be solved analytically and is defined as:
+
+        form_factor = 3 / u**3 * (np.sin(u) - u * np.cos(u))
+        where, 
+        u = 2 * wavevector * radius * np.sin(theta / 2)
+
+        Parameters
+        ----------
+        theta : ndarray
+            Matrix of angles theta.
+        wavevector : float
+            wavevector.
+        radius : float
+            The radius of the particle.
+
+        Returns
+        -------
+        form_factor : ndarray
+            The form factor of the scattering.
+        """
+
+        #Set a tolerance for 0 values.
+        tol = 1e-12
+
+        #Calculate variable.
+        u = 2 * wavevector * radius * np.sin(theta / 2)
+
+        #Remove zero values and set to tol.
+        u[u==0] = tol
+
+        #Analytical formula for form factor of a sphere.
+        form_factor = 3 / u**3 * (np.sin(u) - u * np.cos(u))
+
+        return form_factor
+
+    def form_factor_spherical_shell(self, wavevector, radius, theta):
+        """Function for calculating the form factor of a spherical shell with known radius in the Rayliegh-Gans theory.
+
+        This can be solved analytically and is defined as:
+
+        form_factor = np.sin(u) / u
+        where, 
+        u = 2 * wavevector * radius * np.sin(theta / 2)
+
+        Parameters
+        ----------
+        theta : ndarray
+            Matrix of angles theta.
+        wavevector : float
+            wavevector.
+        radius : float
+            The radius of the particle.
+
+        Returns
+        -------
+        form_factor : ndarray
+            The form factor of the scattering.
+        """
+
+        #Set a tolerance for 0 values.
+        tol = 1e-12
+
+        #Calculate variable.
+        u = 2 * wavevector * radius * np.sin(theta / 2)
+
+        #Remove zero values and set to tol.
+        u[u==0] = tol
+
+        #Analytical formula for form factor of a sphere.
+        form_factor = np.sin(u) / u
+
+        return form_factor
+
+
+    def ClausiusMossotti(self, refractive_index, refractive_index_medium):
+        """Function that calculates the Clausius-Mossotti factor for a given refractive index and medium.
+        Works for complex refractive indeces aswell as for real-valued ones.
+
+        Parameters
+        ----------
+        refractive_index : float
+            Refractive index of the particle.
+        refractive_index_medium : float
+            Refractive index of the medium
+ 
+        Returns
+        -------
+        Clausius-Mossotti factor : float
+            Clausius-Mossotti factor.
+        """
+        return (refractive_index**2 - refractive_index_medium**2) / (refractive_index**2 + 2*refractive_index_medium**2)
+
+    def form_factor_arbitrary_shape(self):
+        """Implement a general form of computing the S matrices. I.e. not only for spheres. Essentially for each voxel.
+        """
+        NotImplementedError("This method is not implemented yet")
+
+    def fix_positions(self, position,  voxel_size, z_scale = []):
+        """Function that "fixes" the list of positions to wanted format. 
+        Scales them with voxel_size.
+
+        Parameters
+        ----------
+        position : list
+            A list of positions [[x, y ,z], [x1, y2, z2], ...]
+        voxel_size : ndarray
+            Size of the voxels in each dimension.
+        z_scale : float
+            Manually inputed z_scale, if a number, then ignore voxel_size[2].
+
+        Returns
+        -------
+        positions : list
+            A list of positions [[x, y ,z], [x1, y2, z2], ...]
+        """
+        
+        positions = []
+        #If predefined z_scale
+        if isinstance(z_scale, (float, int)):
+            voxel_size[2] = z_scale
+
+        #Go through positions and scale.
+        for _, p in enumerate(position):
+            positions.append((p[0]*voxel_size[0], p[1]*voxel_size[1], p[2]*voxel_size[2]))
+        return positions
+
+    def aggregate_sphere(self, theta, phi, position, K, k, radius, voxel_size, r0_index = 0):
+        """Computes the S matrix for n spheres in an aggregate in the RayleighGans approximation.
+        Assume one sphere as refererence (r0_index), should in general be the first one.
+
+        Computes each spheres individual contribution to the matrix S by computing its known form factor, Clausius-Mossotti factor, radius and relative position to r0_index.
+
+        For more details see Equation 6.9 and 6.10 in:
+            Bohren, Craig F., and Donald R. Huffman. Absorption and scattering of light by small particles. John Wiley & Sons, 2008.
+
+        Parameters
+        ----------
+        theta : ndarray (float)
+            Matrix of theta angles.
+        phi : ndarray (float)
+            Matrix of phi angles.
+        position : list
+            A list of positions [[x, y ,z], [x1, y2, z2], ...] of the particles.
+        K : ndarray (float)
+            Clausius-Mossotti factor
+        k : float
+            Wavevector
+        voxel_size : ndarray (float)
+            Array of voxel sizes in each dimension
+        r0_index : int
+            Which sphere to use as reference, should in general be the first one.  
+
+        Returns
+        -------
+        S : ndarray
+            Complexed valued scattering matrix.
+
+        """
+
+        #Precalculated k_diff in each x, y, z.
+        k_diff = - np.array([k * np.sin(theta) * np.cos(phi), k * np.sin(theta) * np.sin(phi), k * np.cos(theta)-k])
+
+        #Fix coordinates such that they are in right format.
+        position = self.fix_positions(position, voxel_size)
+
+        #Set "base" particle
+        r0 = position[r0_index]
+
+        #Compute the positions difference from the base particle.
+        positions = np.array(np.array(position) - r0)
+
+        S = 0
+        #Loop through each spherical particle and add its contribution to S
+        for i in range(len(positions)):
+            ss =  (
+                K[i] 
+                * np.exp(1j * (np.sum([ik*j for (ik, j) in zip(positions[i], k_diff)], axis = 0))) 
+                * 4 * np.pi * radius[i]**3 / 3 
+                * self.form_factor_sphere(theta, k, radius[i])
+                )
+            S += ss
+
+        S = S * (3*1j * k**3) / (2 * np.pi)
+
+        return S
+
+    def get(
+        self,
+        inp,
+        position,
+        output_region,
+        voxel_size,
+        padding,
+        offset_z,
+        collection_angle,
+        polarization_angle,
+        radius,
+        form_factor_name,
+        K,
+        k,
+        backscatter,
+        **kwargs
+    ):
+
+        xSize = padding[2] + output_region[2] - output_region[0] + padding[0]
+        ySize = padding[3] + output_region[3] - output_region[1] + padding[1]
+        arr = pad_image_to_fft(np.zeros((xSize, ySize)))
+
+        # Evluation grid for a single sphere
+        if form_factor_name == "sphere" or form_factor_name=="sphericalshell":
+            x = np.arange(-padding[0], arr.shape[0] - padding[0]) - (position[0])
+            y = np.arange(-padding[1], arr.shape[1] - padding[1]) - (position[1])
+        
+        # Evluation grid for a single sphere, aswell, but with position for first sphere in the list
+        elif form_factor_name == "aggregatespheres":
+            x = np.arange(-padding[0], arr.shape[0] - padding[0]) - (position[0][0])
+            y = np.arange(-padding[1], arr.shape[1] - padding[1]) - (position[0][1])
+
+        X, Y = np.meshgrid(x * voxel_size[0], y * voxel_size[1], indexing="ij")
+
+        #Cupy works for single spheres only as of now.
+        if form_factor_name == "sphere" or form_factor_name=="sphericalshell":
+            X = image.maybe_cupy(X)
+            Y = image.maybe_cupy(Y)
+
+        #Get the distances within the particle.
+        R2 = np.sqrt(X ** 2 + Y ** 2)
+        R3 = np.sqrt(R2 ** 2 + (offset_z) ** 2)
+        ct = offset_z / R3
+        ct_max = np.cos(collection_angle)
+
+        #Get the angles of the incoming light.
+        PHI = np.arctan2(Y, X) + polarization_angle
+
+        #Retrieve THETA depending on scattering direction. If backscatter = true -> ISCAT
+        if backscatter:
+            THETA = np.arccos(-ct)
+        else:
+            THETA = np.arccos(ct)
+
+        COS = np.cos(PHI)
+        COS2 = COS**2
+        SIN2 = 1 - COS2
+        
+        #Calculate S for the case of a single sphere.
+        if form_factor_name == "sphere":
+            form_factor = self.form_factor_sphere(THETA, k, radius)
+            V = 4 * np.pi * radius**3 / 3
+            S = (3*1j * k**3 / ( 2*np.pi)) * K * V * form_factor
+
+        elif form_factor_name == "sphericalshell":
+            form_factor = self.form_factor_spherical_shell(THETA, k, radius)
+            V = 4 * np.pi * radius**3 / 3
+            S = (3*1j * k**3 / ( 2*np.pi)) * K * V * form_factor            
+
+        #Calculate S for the case of a aggregate of n spheres.
+        elif form_factor_name == "aggregatespheres":
+            S = self.aggregate_sphere(THETA, PHI, position, K, k, radius, voxel_size)
+
+        #Calculate S for the case of an arbitrary shape.
+        elif form_factor_name == "arbitrary":
+            form_factor = self.form_factor_arbitrary_shape(THETA, k, R3)
+
+        #Retrieve the scattering matrices S1 and S2.
+        S1 = S
+        S2 = S*ct
+
+        # Calculate the field
+        field = (
+            (ct > ct_max)
+            * 1j
+            / (k * R3)
+            * np.exp(1j * k * (R3 - offset_z))
+            * (S1 * COS2 + S2 * SIN2)
+        )
+
+        return np.expand_dims(field, axis=-1)
+
+
+
+class RayleighGansSphere(RayleighGansScatter):
+    """Scattered field by a sphere in Rayleigh-Gans scattering theory
+     
+
+    Parameters
+    ----------
+    radius : float
+        Radius of the particle in meter.
+    refractive_index : float
+        Refractive index of the particle
+    form_factor_name : str
+        The form factor, should not be changed in this class.
+
+    """
+
+    def __init__(
+        self,
+        radius: PropertyLike[float] = 1e-7,
+        refractive_index: PropertyLike[float] = 1.45,
+        form_factor_name: PropertyLike[str] = "sphere",
+        **kwargs
+    ):
+        super().__init__(
+            radius=radius,
+            refractive_index=refractive_index,
+            form_factor_name=form_factor_name,
+            **kwargs,
+        )
+
+class RayleighGansSphericalShell(RayleighGansScatter):
+    """Scattered field by a spherical shell in Rayleigh-Gans scattering theory
+     
+
+    Parameters
+    ----------
+    radius : float
+        Radius of the particle in meter.
+    refractive_index : float
+        Refractive index of the particle
+    form_factor_name : str
+        The form factor, should not be changed in this class.
+
+    """
+
+    def __init__(
+        self,
+        radius: PropertyLike[float] = 1e-7,
+        refractive_index: PropertyLike[float] = 1.45,
+        form_factor_name: PropertyLike[str] = "sphericalshell",
+        **kwargs
+    ):
+        super().__init__(
+            radius=radius,
+            refractive_index=refractive_index,
+            form_factor_name=form_factor_name,
+            **kwargs,
+        )
+
+class RayleighGansAggregateSpheres(RayleighGansScatter):
+    """Scattered field by n spheres in Rayleigh-Gans scattering theory
+
+    Parameters
+    ----------
+    radius : float
+        Radius of the particles in meter. Should be a list of n spheres.
+    refractive_index : float
+        Refractive index of the particles. Should be a list of n spheres.
+    zrange : float
+        Zrange within which to simulate the positions of the particles.
+    xy_offset_range: float
+        Determines the possible offset from the center of first particle in the aggregate.
+    position_simulation_case : str
+        Str of which way to simulate the positions in.
+    """
+
+    def __init__(
+        self,
+        radius: PropertyLike[float] = [1e-7, 1e-7, 1e-7],
+        refractive_index: PropertyLike[float] = [1.45, 1.45, 1.45],
+        zrange : PropertyLike[float] = [-1e-6, 1e-6],
+        xy_offset_range : PropertyLike[float] = [6, 6],
+        position_simulation_case = "random",
+        form_factor_name: PropertyLike[str] = "aggregatespheres",
+        **kwargs
+    ):
+        #def get_positions(self, radius, z_pos, image_size, position_simulation_case):
+
+            #if position_simulation_case == "random":
+            #    positions = D.dla.random_spheres(radius, z_pos, image_size)
+            #return positions
+
+        super().__init__(
+            radius=radius,
+            refractive_index=refractive_index,
+            zrange = zrange,
+            xy_offset_range = xy_offset_range,
+            form_factor_name=form_factor_name,
+            position_simulation_case = position_simulation_case,
+            **kwargs,
+        )
+
