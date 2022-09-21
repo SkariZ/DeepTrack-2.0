@@ -1,4 +1,11 @@
-"Special functions for placing spheres in a volume"
+"""Special functions for placing spheres in a volume
+
+    Functions:
+        random_spheres - Place spheres randomly
+        side_by_side_spheres - Place 2 connected spheres
+        small_packing_off_spheres - Place 3 - 12 connected spheres.
+
+"""
 
 import numpy as np
 from ._config import cupy
@@ -177,8 +184,8 @@ def small_packing_off_spheres(pos, xy_offset_range, zrange, radius, voxel_size, 
     if isinstance(seed, int):
         np.random.seed(seed)
 
-    if len(radius) < 3 or len(radius)>10:
-        raise ValueError("This function is meant for between 3-10 spheres, change the radius list to have more/less values")
+    if len(radius) < 3 or len(radius)>12:
+        raise ValueError("This function is meant for between 3-12 spheres, change the radius list to have more/less values")
 
     #Here we get two spheres that are side-by-side
     positions = side_by_side_spheres(pos, xy_offset_range, zrange, radius[:2], voxel_size, output_region, z_upscale)
@@ -252,5 +259,5 @@ def small_packing_off_spheres(pos, xy_offset_range, zrange, radius, voxel_size, 
 
         if global_break:
             break
-        
+
     return positions

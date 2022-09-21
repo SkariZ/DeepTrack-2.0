@@ -1252,8 +1252,7 @@ class RayleighGansScatter(Scatterer):
 
 class RayleighGansSphere(RayleighGansScatter):
     """Scattered field by a sphere in Rayleigh-Gans scattering theory
-     
-
+    
     Parameters
     ----------
     radius : float
@@ -1282,7 +1281,6 @@ class RayleighGansSphere(RayleighGansScatter):
 class RayleighGansSphericalShell(RayleighGansScatter):
     """Scattered field by a spherical shell in Rayleigh-Gans scattering theory
      
-
     Parameters
     ----------
     radius : float
