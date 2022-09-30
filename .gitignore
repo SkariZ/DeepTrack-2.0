@@ -19,3 +19,5 @@ data/
 datasets/
 examples/**/*/models/
 **/node_modules/
+
+examples/module-examples/sim/
