@@ -421,11 +421,6 @@ class Fluorescence(Optics):
         return output_image
 
 
-import torch
-import numpy as np
-from deeptrack.optics import Optics
-from deeptrack.image import Image
-from deeptrack.utils import maybe_cupy, pad_image_to_fft
 
 class Brightfield(Optics):
     """GPU-accelerated Brightfield microscopy simulation using PyTorch."""

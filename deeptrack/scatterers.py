@@ -180,9 +180,6 @@ from . import pad_image_to_fft, Image
 from .types import PropertyLike, ArrayLike
 from . import units as u
 
-import torch
-from deeptrack.backend.core import DeepTrackNode
-
 class Scatterer(Feature):
     """Base abstract class for scatterers.
 
@@ -381,24 +378,6 @@ class PointParticle(Scatterer):
         scale = get_active_scale()
         return np.ones((1, 1, 1)) * np.prod(scale)
 
-    def torch(self, dtype=torch.float32, device=torch.device('cpu')):
-        class TorchScatterer(DeepTrackNode):
-            def __init__(self):
-                super().__init__()
-
-            def __call__(self, image, **kwargs):
-                scale = get_active_scale()
-                tensor = torch.ones((1, 1, 1), dtype=dtype, device=device, requires_grad=True) * torch.prod(torch.tensor(scale, dtype=dtype, device=device))
-                return tensor + image.sum()
-
-            def get(self, image, **kwargs):
-                return self(image, **kwargs)
-            
-            def store_properties(self):
-                pass
-
-        return TorchScatterer()
-    
 
 class Ellipse(Scatterer):
     """Generates an elliptical disk scatterer

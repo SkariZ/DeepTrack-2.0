@@ -1332,6 +1332,32 @@ class Image:
 
         return self
 
+    def to_torch(self):
+        """Convert the image's underlying value to a PyTorch tensor.
+
+        This method converts the `_value` of the `Image` object to a PyTorch tensor
+        if it is currently a NumPy array. If the conversion is performed, the 
+        method returns a new `Image` object with the converted value while 
+        preserving the properties of the original `Image`.
+
+        If the `_value` is already a PyTorch tensor or an unsupported type, the 
+        method returns the `Image` object unchanged.
+
+        Returns
+        -------
+        Image
+            A new `Image` object with the `_value` as a PyTorch tensor, or the 
+            unchanged `Image` object if conversion is not applicable.
+        """
+        import torch
+        if isinstance(self._value, np.ndarray):
+            return Image(
+                torch.tensor(self._value),
+                copy=False,
+            ).merge_properties_from(self)
+
+        return self
+
     def __getattr__(
         self: 'Image',
         key: str,
