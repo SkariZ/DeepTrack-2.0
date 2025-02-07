@@ -11,16 +11,16 @@ optics = dt.optics_torch.Brightfield(
 )
 
 # Random 64*64 image
-image = torch.rand(1, 64, 64, 64)
-image = dt.Image(image)
+#image = torch.rand(1, 64, 64, 64)
+#image = dt.Image(image)
 
-imaged_scatterer = optics(image)
-imaged_scatterer.update()()
+#imaged_scatterer = optics(image)
+#imaged_scatterer.update()()
 
 
-microscope = dt.Microscope(sample=image, objective=optics)
-image = microscope.get(None)
-print(image.shape)
+#microscope = dt.Microscope(sample=image, objective=optics)
+#image = microscope.get(None)
+#print(image.shape)
 
 
 def setup_optics(nsize, wavelength=532e-9, resolution=100e-9, magnification=1, return_field=True):
@@ -69,6 +69,23 @@ def setup_optics(nsize, wavelength=532e-9, resolution=100e-9, magnification=1, r
         "filtered_properties": filtered_properties,
         }
 
-optics_setup = setup_optics(64)
-object = dt.Image(object)
+#Create a random object, a cube with a smaller cube inside
+object = torch.zeros((96, 96, 96)) + 1.33
+object[16:80, 16:80, 16:80] = 1.4
+object[32:64, 32:64, 32:64] = 1.5
+object[40:56, 40:56, 40:56] = 1.6
+object = object + 0.0j
+#object = torch.rand(64, 64, 64)
+#Scale the object to the range [1.33, 1.50]
+#object = 1.33 + 0.17 * object + 0.01j * object
+#object = object
+
+optics_setup = setup_optics(96)
+
+
 image = optics_setup['optics'].get(object, optics_setup['limits'], optics_setup['fields'], **optics_setup['filtered_properties'])
+
+
+import matplotlib.pyplot as plt
+
+plt.imshow(image.imag)

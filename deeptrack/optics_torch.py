@@ -886,65 +886,72 @@ class Optics(Feature):
             return new_volume, new_limits
 
 
+    import torch
+    from typing import Any, Dict
+
     def _pad_volume_tensor(
-        volume: ArrayLike[torch.Tensor] = None,
-        limits: ArrayLike[torch.Tensor] = None,
-        padding: ArrayLike[torch.Tensor] = None,
-        output_region: ArrayLike[torch.Tensor] = None,
+        self: 'Optics',
+        volume: torch.Tensor,
+        limits: torch.Tensor = None,
+        padding: torch.Tensor = None,
+        output_region: torch.Tensor = None,
         **kwargs: Dict[str, Any],
-    ) -> tuple:
-        """Pads the volume with zeros to avoid edge effects.
-
-        Parameters
-        ----------
-        volume: torch.Tensor
-            The volume to pad.
-        limits: torch.Tensor, optional
-            The limits of the volume.
-        padding: torch.Tensor, optional
-            The padding to apply. Format is (left, right, top, bottom).
-        output_region: torch.Tensor, optional
-            The region of the volume to return. Used to remove regions of the
-            volume that are far outside the view. If None, the full volume is
-            returned.
-
-        Returns
-        -------
-        new_volume: torch.Tensor
-            The padded volume.
-        new_limits: torch.Tensor
-            The new limits of the volume.
-        """
+        ) -> tuple:
+        """Pads the volume with zeros to avoid edge effects."""
         
         if limits is None:
-            limits = torch.zeros((3, 2), dtype=torch.int32)
+            limits = torch.zeros((3, 2), dtype=torch.int32, device=volume.device)
         
+
         new_limits = limits.clone()
-        output_region = output_region.clone() if output_region is not None else torch.tensor([None, None, None, None])
-        
-        # Replace None entries with current limit
-        output_region[0] = new_limits[0, 0] if output_region[0] is None else output_region[0]
-        output_region[1] = new_limits[0, 1] if output_region[1] is None else output_region[1]
-        output_region[2] = new_limits[1, 0] if output_region[2] is None else output_region[2]
-        output_region[3] = new_limits[1, 1] if output_region[3] is None else output_region[3]
-        
+
+        # Ensure padding is a tensor
+        if not isinstance(padding, torch.Tensor):
+            padding = torch.tensor(padding, dtype=torch.int32, device=volume.device)
+
+        # Ensure output_region is properly initialized
+        if output_region is None:
+            output_region = limits.clone()  # Default to current limits
+        elif not isinstance(output_region, torch.Tensor):
+            output_region = torch.tensor(output_region, dtype=torch.int32, device=volume.device)
+
+        # Handle None values in output_region (replace with current limits)
+        for i in range(4):
+            if output_region[i] < 0 or output_region[i] is None:
+                output_region[i] = limits[i // 2, i % 2]
+
+        # Update new_limits
         for i in range(2):
             new_limits[i, 0] = torch.min(new_limits[i, 0], output_region[i] - padding[i])
             new_limits[i, 1] = torch.max(new_limits[i, 1], output_region[i + 2] + padding[i + 2])
-        
+
+        # Compute new shape
         new_shape = (new_limits[:, 1] - new_limits[:, 0]).int().tolist()
         new_volume = torch.zeros(new_shape, dtype=volume.dtype, device=volume.device)
         
+        # Compute old region
         old_region = (limits - new_limits).int()
         limits = limits.int()
+
+        # Ensure indexing remains within valid bounds
+        #new_volume = Image(
+        #    new_volume[
+        #    old_region[0, 0]: old_region[0, 0] + limits[0, 1] - limits[0, 0],
+        #    old_region[1, 0]: old_region[1, 0] + limits[1, 1] - limits[1, 0],
+        #    old_region[2, 0]: old_region[2, 0] + limits[2, 1] - limits[2, 0],
+        #    ]
+        #    )
         
+        #new_volume = volume
+
         new_volume[
             old_region[0, 0] : old_region[0, 0] + limits[0, 1] - limits[0, 0],
             old_region[1, 0] : old_region[1, 0] + limits[1, 1] - limits[1, 0],
             old_region[2, 0] : old_region[2, 0] + limits[2, 1] - limits[2, 0],
         ] = volume
-        
+
         return new_volume, new_limits
+
 
 
     def __call__(
@@ -1184,15 +1191,14 @@ class Brightfield(Optics):
         z_iterator = torch.linspace(
             z_limits[0],
             z_limits[1],
-            num=padded_volume.shape[2],
-            endpoint=False,
-        )
+            padded_volume.shape[2],
+            )
 
         zero_plane = torch.all(padded_volume == 0, axis=(0, 1), keepdims=False)
         # z_values = z_iterator[~zero_plane]
 
         volume = pad_image_to_fft(padded_volume, axes=(0, 1))
-
+        
         voxel_size = get_active_voxel_size()
 
         pupils = [
@@ -1218,7 +1224,7 @@ class Brightfield(Optics):
 
         pupil_step = torch.fft.fftshift(pupils[0])
 
-        light_in = torch.ones(volume.shape[:2], dtype=complex)
+        light_in = torch.ones((volume.shape[:2]), dtype=torch.complex64)
         light_in = self.illumination.resolve(light_in)
         light_in = torch.fft.fft2(light_in)
 
@@ -1251,7 +1257,7 @@ class Brightfield(Optics):
         output_image = torch.fft.ifft2(light_in_focus)[
             : padded_volume.shape[0], : padded_volume.shape[1]
         ]
-        output_image = torch.expand_dims(output_image, axis=-1)
+        output_image = torch.unsqueeze(output_image, axis=-1)
         output_image = Image(output_image[pad[0] : -pad[2], pad[1] : -pad[3]])
 
         if not kwargs.get("return_field", False):
@@ -1261,6 +1267,7 @@ class Brightfield(Optics):
         # output_image = output_image - 1
         # output_image = output_image * np.exp(1j * -np.pi / 4)
         # output_image = output_image + 1
+        illuminated_volume = Image(illuminated_volume)
 
         output_image.properties = illuminated_volume.properties
 
